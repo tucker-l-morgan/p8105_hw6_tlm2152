@@ -1,0 +1,102 @@
+---
+title: "P8105 Homework 6"
+author: "Tucker Morgan (tlm2152)"
+date: "12/4/2021"
+output: github_document
+---
+
+```{r setup, message = FALSE}
+library(tidyverse)
+library(modelr)
+```
+
+## Problem 1
+
+```{r loading birthweight data}
+birthweight_df <- read_csv("./Data/birthweight.csv")
+str(birthweight_df)
+
+na_check <- birthweight_df[rowSums(is.na(birthweight_df)) > 0,]
+na_check
+rm(na_check)
+```
+
+Looks like I will want to convert a handful of variables like `babysex`, `frace`, `malform`, and `mrace` to factors instead of numeric vectors. And it doesn't seem like there are any NA values to account for before analysis.
+```{r cleaning birthweight data}
+birthweight_df <- 
+  birthweight_df %>% 
+  mutate(babysex = factor(babysex,
+                          levels = c(1, 2),
+                          labels = c("male", "female"))) %>% 
+  mutate(frace = factor(frace,
+                        levels = c(1, 2, 3, 4, 8, 9),
+                        labels = c("White", "Black", "Asian", "Puerto Rican", "Other", "Unknown"))) %>% 
+  mutate(malform = factor(malform,
+                          levels = c(0, 1),
+                          labels = c("abset", "present"))) %>% 
+  mutate(mrace = factor(mrace,
+                        levels = c(1, 2, 3, 4, 8),
+                        labels = c("White", "Black", "Asian", "Puerto Rican", "Other")))
+```
+
+My proposed regression model for birthweight is based on hypothesized factors. I hypothesize that the following factors will affect birthweight:
+
+  * `gaweeks`: gestational age in weeks - hypothesized to increase weight with greater age;
+  * `malform`: presence of malformations that could affect weight - hypothesized to decrease weight;
+  * `momage`: mother's age at delivery (years) - hypothesized to decrease weight with greater mother age;
+  * `wtgain`: mother's weight gain during pregnancy (pounds) - hypothesized to increase birthweight with greater weight gain during pregnancy.
+
+```{r birthweight models}
+hyp_mod = lm(bwt ~ gaweeks + malform + momage + wtgain, data = birthweight_df)
+main_fx_mod = lm(bwt ~ blength + gaweeks, data = birthweight_df)
+interact_mod = lm(bwt ~ bhead + blength + babysex + (bhead * blength) + (bhead * babysex) + (bhead * blength * babysex), data = birthweight_df)
+
+hyp_mod %>% broom::tidy()
+```
+
+There are significant p-values here for some of my hypothesized predictors. Particularly `gaweeks` and `wtgain` seem to have the most statistically significant effects. Let's look at some residuals for the hypothesized model.
+
+```{r residuals predictions and plotting}
+birthweight_df %>% 
+  add_predictions(hyp_mod) %>% 
+  add_residuals(hyp_mod) %>% 
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point() +
+  geom_smooth(se = FALSE) +
+  labs(x = "Predicted Birthweight (grams)", y = "Residual", title = "Hypothesized Model Predictions vs Residuals")
+```
+
+Most of the residuals seem to be fairly evenly dispersed about 0, however there are some rather large differences. For instance some predicted birthweights of 2000 grams have a residual of over 1000 grams. We also seem to have more positive residuals on the low end of our predictions and more negative residuals towards the maximum prediction, which might be concerning for this model. Let's take a look at a couple of others and compare root mean squared error (RMSE).
+
+```{r main effects and interactions models}
+cv_df <- 
+  crossv_mc(birthweight_df, 100) %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble)) %>% 
+  mutate(
+    hyp_model      = map(.x = train, ~lm(bwt ~ gaweeks + malform + momage + wtgain, data = .x)),
+    main_fx_model  = map(.x = train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+    interact_model = map(.x = train, ~lm(bwt ~ bhead + blength + babysex + (bhead * blength) + (bhead * babysex) + (bhead * blength * babysex), data = .x))
+    ) %>% 
+  mutate(
+    rmse_hyp      = map2_dbl(.x = hyp_model, .y = test, ~rmse(model = .x, data = .y)),
+    rmse_main_fx  = map2_dbl(.x = main_fx_model, .y = test, ~rmse(model = .x, data = .y)),
+    rmse_interact = map2_dbl(.x = interact_model, .y = test, ~rmse(model = .x, data = .y))
+    )
+```
+
+```{r plotting RMSE for each model}
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+```
+
+Based on the plot above, it looks like the hypothesized model has a much higher RMSE compared to the other two. This lends credence to the idea of using model diagnostics and data-driven model-building processes rather than using hypotheses alone.
+
