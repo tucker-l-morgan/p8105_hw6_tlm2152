@@ -8,6 +8,7 @@ output: github_document
 ```{r setup, message = FALSE}
 library(tidyverse)
 library(modelr)
+library(patchwork)
 ```
 
 ## Problem 1
@@ -22,6 +23,7 @@ rm(na_check)
 ```
 
 Looks like I will want to convert a handful of variables like `babysex`, `frace`, `malform`, and `mrace` to factors instead of numeric vectors. And it doesn't seem like there are any NA values to account for before analysis.
+
 ```{r cleaning birthweight data}
 birthweight_df <- 
   birthweight_df %>% 
@@ -100,3 +102,130 @@ cv_df %>%
 
 Based on the plot above, it looks like the hypothesized model has a much higher RMSE compared to the other two. This lends credence to the idea of using model diagnostics and data-driven model-building processes rather than using hypotheses alone.
 
+## Problem 2
+
+Now, let's look at bootstrapping with weather data from `rnoaa`.
+```{r loading NOAA data}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+
+Next, I'll use `bootstrap` to take 5000 samples with replacement of the same size as the original data set.
+```{r bootstrapping}
+set.seed(23)
+
+boot_weather <- bootstrap(weather_df, 5000) %>% 
+  rename(boot_sample = strap, boot_id = .id) %>% 
+  mutate(boot_id = as.integer(boot_id))
+```
+
+```{r checking bootstraps}
+as.data.frame(boot_weather$boot_sample[[1]])
+```
+
+And it looks like this has the correct number of rows and columns that we would expect. Next, I'll calculate $\hat{r}^2$ or `r_squared` and $\log(\beta_0 * \beta_1)$ or `log_var` for each bootstrap sample.
+
+```{r bootstrap analysis}
+boot_results <- 
+  boot_weather %>% 
+  mutate(
+    models = map(boot_sample, ~lm(tmax ~ tmin, data = .x)),
+    results = map(models, broom::tidy),
+    glance = map(models, broom::glance)
+  ) %>% 
+  select(-boot_sample, -models) %>% 
+  unnest(c(results, glance), names_repair = "unique") %>% 
+  group_by(boot_id)
+
+boot_clean <- 
+  boot_results %>% 
+  select(boot_id, term, estimate, r.squared, adj.r.squared) %>% 
+  pivot_wider(names_from = term, values_from = estimate) %>% 
+  janitor::clean_names() %>% 
+  mutate(log_var = log(intercept * tmin))
+```
+
+```{r bootstrap plots}
+r_sq_dist <- 
+  boot_clean %>% 
+  ggplot(aes(x = r_squared, fill = "brickred")) +
+  geom_density(alpha = 0.2) +
+  labs(title = "Distribution of r_squared") +
+  theme(legend.position = "none") +
+  stat_function(fun = dnorm,
+                args = with(boot_clean, c(mean = mean(r_squared), sd = sd(r_squared))),
+                color = "red",
+                size = 1.5,
+                alpha = .7)
+  
+log_var_dist <- 
+  boot_clean %>% 
+  ggplot(aes(x = log_var)) +
+  geom_density(alpha = 0.2, fill = "dodgerblue1") +
+  labs(title = "Distribution of log_var") +
+  stat_function(fun = dnorm,
+                args = with(boot_clean, c(mean = mean(log_var), sd = sd(log_var))),
+                color = "blue",
+                size = 1.5,
+                alpha = .7)
+  
+r_sq_dist / log_var_dist
+```
+
+And when looking at the estimate distributions, they both look fairly normal. I've included a normal distribution with the respective means and standard deviations for comparison. One could argue that the distributions are slightly left-skewed, but they are very close to normal.
+
+```{r quantiles}
+r_squared_bounds <- 
+  quantile(pull(boot_clean, r_squared), probs = c(.025, 0.975), names = FALSE, type = 4)
+
+log_var_bounds <- 
+  quantile(pull(boot_clean, log_var), probs = c(.025, 0.975), names = FALSE, type = 4)
+
+data.frame(estimate = c("r_squared", "log_var"),
+          lower_bound = c(r_squared_bounds[[1]], log_var_bounds[[1]]),
+          upper_bound = c(r_squared_bounds[[2]], log_var_bounds[[2]]))
+```
+
+So the bounds of `r_squared` are `r round(r_squared_bounds[[1]], digits = 2)` and `r round(r_squared_bounds[[2]], digits = 2)`. And the bounds of `log_var` are `r round(log_var_bounds[[1]], digits = 2)` and `r round(log_var_bounds[[2]], digits = 2)`. Now let's look at the same distribution plots with these bounds shown.
+
+```{r plots with quantiles}
+r_sq_dist <- 
+  boot_clean %>% 
+  ggplot(aes(x = r_squared, fill = "brickred")) +
+  geom_density(alpha = 0.2) +
+  labs(title = "Distribution of r_squared", y = "density") +
+  theme(legend.position = "none") +
+  stat_function(fun = dnorm,
+                args = with(boot_clean, c(mean = mean(r_squared), sd = sd(r_squared))),
+                color = "red",
+                size = 1.5,
+                alpha = .7) +
+  geom_vline(xintercept = c(r_squared_bounds),
+             linetype = "dashed")
+  
+log_var_dist <- 
+  boot_clean %>% 
+  ggplot(aes(x = log_var)) +
+  geom_density(alpha = 0.2, fill = "dodgerblue1") +
+  labs(title = "Distribution of log_var", y = "density") +
+  stat_function(fun = dnorm,
+                args = with(boot_clean, c(mean = mean(log_var), sd = sd(log_var))),
+                color = "blue",
+                size = 1.5,
+                alpha = .7) +
+    geom_vline(xintercept = c(log_var_bounds),
+             linetype = "dashed")
+  
+r_sq_dist / log_var_dist
+```
+
+That's nice.
